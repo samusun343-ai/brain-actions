@@ -38,6 +38,7 @@ jobs:
             sleep 2
           done
           echo "TUNNEL_URL=$URL"
+          echo "::notice title=TUNNEL_URL::$URL"
           {
             echo "### SSH tunnel endpoint"
             echo "$URL"
