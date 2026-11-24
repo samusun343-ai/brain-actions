@@ -1,0 +1,52 @@
+name: runner-session
+
+on:
+  workflow_dispatch:
+
+jobs:
+  session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - name: Setup SSH (public key only)
+        run: |
+          set -e
+          mkdir -p ~/.ssh
+          cat > ~/.ssh/authorized_keys <<'EOF'
+          ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJnMisOT/M1a28Ld2JWdqrft685Kr0G6KfZWEO84f1Em hatch
+          EOF
+          chmod 700 ~/.ssh
+          chmod 600 ~/.ssh/authorized_keys
+          if [ ! -x /usr/sbin/sshd ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq openssh-server >/dev/null
+          fi
+          sudo ssh-keygen -A
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -o Port=2222 -o PasswordAuthentication=no -o PubkeyAuthentication=yes -o ChallengeResponseAuthentication=no
+          echo "sshd listening on 2222 (key auth only)"
+
+      - name: Open tunnel
+        run: |
+          set -e
+          curl -sL -o /tmp/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x /tmp/cloudflared
+          nohup /tmp/cloudflared tunnel --url tcp://127.0.0.1:2222 --no-autoupdate > /tmp/cf.log 2>&1 &
+          URL=""
+          for i in $(seq 1 30); do
+            URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cf.log | head -1 || true)
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+          echo "TUNNEL_URL=$URL"
+          {
+            echo "### SSH tunnel endpoint"
+            echo "$URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "--- runner specs ---"
+          nproc
+          free -m
+          df -h / | tail -1
+
+      - name: Keep alive until timeout
+        run: |
+          while true; do echo "alive $(date -u +%FT%TZ)"; sleep 300; done
