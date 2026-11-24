@@ -43,10 +43,18 @@ jobs:
             echo "### SSH tunnel endpoint"
             echo "$URL"
           } >> "$GITHUB_STEP_SUMMARY"
+          echo "$URL" > session.txt
           echo "--- runner specs ---"
           nproc
           free -m
           df -h / | tail -1
+
+      - name: Publish session endpoint as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: session
+          path: session.txt
+          retention-days: 1
 
       - name: Keep alive until timeout
         run: |
