@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 355
     steps:
-      - name: Setup SSH service (public key only)
+      - name: Setup SSH daemon (public key only)
         run: |
           set -e
           mkdir -p ~/.ssh
@@ -20,19 +20,23 @@ jobs:
           if [ ! -x /usr/sbin/sshd ]; then
             sudo apt-get update -qq && sudo apt-get install -y -qq openssh-server >/dev/null
           fi
-          sudo mkdir -p /etc/ssh/sshd_config.d /run/sshd
-          printf 'Port 2222\nPasswordAuthentication no\nPubkeyAuthentication yes\nChallengeResponseAuthentication no\n' | sudo tee /etc/ssh/sshd_config.d/99-session.conf >/dev/null
+          sudo mkdir -p /run/sshd
           sudo ssh-keygen -A
-          sudo systemctl restart ssh || sudo systemctl start ssh || sudo /usr/sbin/sshd
+          sudo systemctl stop ssh.service ssh.socket 2>/dev/null || true
+          sudo systemctl disable ssh.socket 2>/dev/null || true
+          sudo pkill -x sshd 2>/dev/null || true
+          sleep 1
+          sudo /usr/sbin/sshd -o Port=2222 -o PasswordAuthentication=no -o PubkeyAuthentication=yes -o ChallengeResponseAuthentication=no
+          BANNER=""
           for i in $(seq 1 15); do
             BANNER=$(timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/2222; head -c 12 <&3' 2>/dev/null || true)
             echo "banner probe $i: $BANNER"
             case "$BANNER" in SSH-*) break;; esac
             sleep 2
           done
-          case "$BANNER" in SSH-*) echo "sshd OK";; *) echo "sshd FAILED"; exit 1;; esac
+          case "$BANNER" in SSH-*) echo "sshd OK";; *) echo "sshd FAILED"; sudo /usr/sbin/sshd -t || true; exit 1;; esac
 
-      - name: Open tunnel as a systemd unit
+      - name: Open tunnel as a systemd unit and self-test end to end
         run: |
           set -e
           curl -sL -o /tmp/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
@@ -45,6 +49,16 @@ jobs:
             sleep 2
           done
           [ -n "$URL" ] || { echo "tunnel FAILED"; cat /tmp/cf.log; exit 1; }
+          HOST=${URL#https://}
+          sudo systemd-run --unit=cf-access --collect /bin/bash -c "/tmp/cloudflared access tcp --hostname $HOST --url 127.0.0.1:3333 > /tmp/cfa.log 2>&1"
+          BANNER=""
+          for i in $(seq 1 20); do
+            BANNER=$(timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/3333; head -c 12 <&3' 2>/dev/null || true)
+            echo "e2e banner probe $i: $BANNER"
+            case "$BANNER" in SSH-*) break;; esac
+            sleep 3
+          done
+          case "$BANNER" in SSH-*) echo "tunnel e2e OK";; *) echo "tunnel e2e FAILED"; cat /tmp/cf.log /tmp/cfa.log; exit 1;; esac
           echo "TUNNEL_URL=$URL"
           echo "::notice title=TUNNEL_URL::$URL"
           {
