@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 355
     steps:
-      - name: Setup SSH (public key only)
+      - name: Setup SSH service (public key only)
         run: |
           set -e
           mkdir -p ~/.ssh
@@ -20,23 +20,31 @@ jobs:
           if [ ! -x /usr/sbin/sshd ]; then
             sudo apt-get update -qq && sudo apt-get install -y -qq openssh-server >/dev/null
           fi
+          sudo mkdir -p /etc/ssh/sshd_config.d /run/sshd
+          printf 'Port 2222\nPasswordAuthentication no\nPubkeyAuthentication yes\nChallengeResponseAuthentication no\n' | sudo tee /etc/ssh/sshd_config.d/99-session.conf >/dev/null
           sudo ssh-keygen -A
-          sudo mkdir -p /run/sshd
-          sudo /usr/sbin/sshd -o Port=2222 -o PasswordAuthentication=no -o PubkeyAuthentication=yes -o ChallengeResponseAuthentication=no
-          echo "sshd listening on 2222 (key auth only)"
+          sudo systemctl restart ssh || sudo systemctl start ssh || sudo /usr/sbin/sshd
+          for i in $(seq 1 15); do
+            BANNER=$(timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/2222; head -c 12 <&3' 2>/dev/null || true)
+            echo "banner probe $i: $BANNER"
+            case "$BANNER" in SSH-*) break;; esac
+            sleep 2
+          done
+          case "$BANNER" in SSH-*) echo "sshd OK";; *) echo "sshd FAILED"; exit 1;; esac
 
-      - name: Open tunnel
+      - name: Open tunnel as a systemd unit
         run: |
           set -e
           curl -sL -o /tmp/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
           chmod +x /tmp/cloudflared
-          nohup /tmp/cloudflared tunnel --url tcp://127.0.0.1:2222 --no-autoupdate > /tmp/cf.log 2>&1 &
+          sudo systemd-run --unit=cf-tunnel --collect /bin/bash -c '/tmp/cloudflared tunnel --url tcp://127.0.0.1:2222 --no-autoupdate > /tmp/cf.log 2>&1'
           URL=""
           for i in $(seq 1 30); do
-            URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cf.log | head -1 || true)
+            URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cf.log 2>/dev/null | head -1 || true)
             [ -n "$URL" ] && break
             sleep 2
           done
+          [ -n "$URL" ] || { echo "tunnel FAILED"; cat /tmp/cf.log; exit 1; }
           echo "TUNNEL_URL=$URL"
           echo "::notice title=TUNNEL_URL::$URL"
           {
