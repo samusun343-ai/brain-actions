@@ -36,36 +36,37 @@ jobs:
           done
           case "$BANNER" in SSH-*) echo "sshd OK";; *) echo "sshd FAILED"; sudo /usr/sbin/sshd -t || true; exit 1;; esac
 
-      - name: Open tunnel as a systemd unit and self-test end to end
+      - name: Open TCP tunnel (bore) as a systemd unit and self-test end to end
         run: |
           set -e
-          curl -sL -o /tmp/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-          chmod +x /tmp/cloudflared
-          sudo systemd-run --unit=cf-tunnel --collect /bin/bash -c '/tmp/cloudflared tunnel --url tcp://127.0.0.1:2222 --no-autoupdate > /tmp/cf.log 2>&1'
-          URL=""
+          BORE_URL=$(curl -s https://api.github.com/repos/ekzhang/bore/releases/latest | grep -o 'https://[^"]*x86_64-unknown-linux-musl\.tar\.gz' | head -1)
+          echo "bore asset: $BORE_URL"
+          curl -sL "$BORE_URL" | tar -xz -C /tmp bore
+          chmod +x /tmp/bore
+          sudo systemd-run --unit=bore-tunnel --collect /bin/bash -c '/tmp/bore local 2222 --to bore.pub > /tmp/bore.log 2>&1'
+          EP=""
           for i in $(seq 1 30); do
-            URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cf.log 2>/dev/null | head -1 || true)
-            [ -n "$URL" ] && break
+            EP=$(grep -o 'bore\.pub:[0-9]*' /tmp/bore.log 2>/dev/null | head -1 || true)
+            [ -n "$EP" ] && break
             sleep 2
           done
-          [ -n "$URL" ] || { echo "tunnel FAILED"; cat /tmp/cf.log; exit 1; }
-          HOST=${URL#https://}
-          sudo systemd-run --unit=cf-access --collect /bin/bash -c "/tmp/cloudflared access tcp --hostname $HOST --url 127.0.0.1:3333 > /tmp/cfa.log 2>&1"
+          [ -n "$EP" ] || { echo "tunnel FAILED"; cat /tmp/bore.log; exit 1; }
+          BPORT=${EP#bore.pub:}
           BANNER=""
           for i in $(seq 1 20); do
-            BANNER=$(timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/3333; head -c 12 <&3' 2>/dev/null || true)
+            BANNER=$(timeout 3 bash -c "exec 3<>/dev/tcp/bore.pub/$BPORT; head -c 12 <&3" 2>/dev/null || true)
             echo "e2e banner probe $i: $BANNER"
             case "$BANNER" in SSH-*) break;; esac
             sleep 3
           done
-          case "$BANNER" in SSH-*) echo "tunnel e2e OK";; *) echo "tunnel e2e FAILED"; cat /tmp/cf.log /tmp/cfa.log; exit 1;; esac
-          echo "TUNNEL_URL=$URL"
-          echo "::notice title=TUNNEL_URL::$URL"
+          case "$BANNER" in SSH-*) echo "tunnel e2e OK";; *) echo "tunnel e2e FAILED"; cat /tmp/bore.log; exit 1;; esac
+          echo "SSH_ENDPOINT=$EP"
+          echo "::notice title=SSH_ENDPOINT::$EP"
           {
-            echo "### SSH tunnel endpoint"
-            echo "$URL"
+            echo "### SSH endpoint"
+            echo "$EP"
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "$URL" > session.txt
+          echo "$EP" > session.txt
           echo "--- runner specs ---"
           nproc
           free -m
